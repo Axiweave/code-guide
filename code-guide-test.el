@@ -335,6 +335,16 @@ for `display-buffer-pop-up-window' forces the same window."
       (push (code-guide-test--current-id) order))
     (nreverse order)))
 
+(defun code-guide-test--reference-dfs (tree &optional depth)
+  "Independent oracle: (ID . DEPTH) pairs of the generated plist TREE in
+depth-first order.  Never consults the package."
+  (let ((depth (or depth 0)))
+    (mapcan (lambda (node)
+              (cons (cons (plist-get node :id) depth)
+                    (code-guide-test--reference-dfs (plist-get node :children)
+                                                    (1+ depth))))
+            (append tree nil))))
+
 (ert-deftest code-guide-property/navigation-round-trip ()
   "Invariants on random trees: `n' visits every node once in depth-first order,
 `p' walks the same path in reverse, `u' undoes `d', and parent depth is
@@ -350,7 +360,8 @@ child depth minus one.  Empty and single-node trees are included."
              (json (json-serialize `(:version 1 :title "T" :nodes ,tree))))
         (with-temp-file guide (insert json))
         (with-current-buffer (code-guide-open-file guide)
-          (let* ((expected (code-guide-test--ids code-guide--nodes))
+          (let* ((reference (code-guide-test--reference-dfs tree))
+                 (expected (mapcar #'car reference))
                  (context (format "seed=%d trial=%d json=%s"
                                   code-guide-test--seed trial json)))
             (if (null expected)
@@ -365,10 +376,12 @@ child depth minus one.  Empty and single-node trees are included."
                   (while (ignore-errors (code-guide-previous-node) t)
                     (push (code-guide-test--current-id) backward))
                   (should (equal (cons context backward) (cons context expected))))
+                (should (equal (cons context
+                                     (mapcar (lambda (n) (cons (code-guide-node-id n)
+                                                               (code-guide-node-depth n)))
+                                             code-guide--nodes))
+                               (cons context reference)))
                 (dolist (node code-guide--nodes)
-                  (when-let* ((parent (code-guide-node-parent node)))
-                    (should (= (code-guide-node-depth node)
-                               (1+ (code-guide-node-depth parent)))))
                   (when (code-guide-node-children node)
                     (code-guide--goto-node node)
                     (code-guide-first-child)
@@ -395,7 +408,7 @@ every heading carries its node.  Titles are random strings."
               (unless (equal id (car rendered)) (push id rendered)))
             (setq pos (next-single-property-change pos 'code-guide-node-id)))
           (should (equal (cons context (nreverse rendered))
-                         (cons context (code-guide-test--ids code-guide--nodes))))
+                         (cons context (mapcar #'car (code-guide-test--reference-dfs tree)))))
           (should (= (length code-guide--nodes) (car counter))))))))
 
 ;;;; Reload
