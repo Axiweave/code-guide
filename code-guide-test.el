@@ -383,6 +383,92 @@ SPEC is an alist of (RELATIVE-PATH . CONTENT); the guide is written to
       (code-guide-parent)
       (should (equal (code-guide-test--current-id) "a")))))
 
+(defun code-guide-test--select-imenu-entry (entry)
+  "Select Imenu ENTRY through its documented special-item interface."
+  (apply (nth 2 entry) (car entry) (cadr entry) (nthcdr 3 entry)))
+
+(ert-deftest code-guide-property/imenu-covers-and-selects-every-node ()
+  "Imenu lists every node once in reading order and selects its target."
+  (random (number-to-string code-guide-test--seed))
+  (message "code-guide property seed: %d" code-guide-test--seed)
+  (dotimes (trial 25)
+    (let* ((tree (pcase trial
+                   (0 [])
+                   (1 (vector (code-guide-test--node "only")))
+                   (_ (code-guide-test--random-tree 0 (list 0)))))
+           (expected (mapcar #'car (code-guide-test--reference-dfs tree)))
+           (json (json-serialize `(:version 1 :title "T" :nodes ,tree)))
+           (context (format "seed=%d trial=%d" code-guide-test--seed trial)))
+      (with-temp-buffer
+        (code-guide-mode)
+        (code-guide--load (code-guide-parse-string json))
+        (let ((entries (funcall imenu-create-index-function)))
+          (should (equal (cons context (length entries))
+                         (cons context (length expected))))
+          (cl-mapc
+           (lambda (entry id)
+             (code-guide-test--select-imenu-entry entry)
+             (should (equal (cons context (code-guide-test--current-id))
+                            (cons context id))))
+           entries expected)
+          (should (zerop (hash-table-count code-guide--visited))))))))
+
+(ert-deftest code-guide-imenu/folded-and-duplicate-nodes ()
+  "Duplicate labels identify each node, and folded targets remain selectable."
+  (let ((json
+         (code-guide-test--json
+          (code-guide-test--node
+           "parent" :title "Punct! Ω"
+           :children (vector (code-guide-test--node "one" :title "Check")
+                             (code-guide-test--node "two" :title "Check")))
+          (code-guide-test--node
+           "other" :title "Other"
+           :children (vector (code-guide-test--node "three" :title "Check"))))))
+    (with-temp-buffer
+      (code-guide-mode)
+      (code-guide--load (code-guide-parse-string json))
+      (should (equal (mapcar #'car (funcall imenu-create-index-function))
+                     '("Punct! Ω"
+                       "Punct! Ω / Check [1]"
+                       "Punct! Ω / Check [2]"
+                       "Other"
+                       "Other / Check")))
+      (code-guide--goto-node (car code-guide--nodes))
+      (code-guide-toggle-subtree)
+      (let ((entry (nth 2 (funcall imenu-create-index-function))))
+        (code-guide-test--select-imenu-entry entry)
+        (should (equal (code-guide-test--current-id) "two"))
+        (should-not (gethash "parent" code-guide--folded))))))
+
+(ert-deftest code-guide-imenu/literal-label-collisions-remain-selectable ()
+  "Literal path and occurrence syntax cannot make two entries ambiguous."
+  (let ((json
+         (code-guide-test--json
+          (code-guide-test--node "flat" :title "A / B")
+          (code-guide-test--node
+           "parent" :title "A"
+           :children (vector (code-guide-test--node "child" :title "B")))
+          (code-guide-test--node
+           "duplicates" :title "P"
+           :children (vector (code-guide-test--node "one" :title "Check")
+                             (code-guide-test--node "two" :title "Check")
+                             (code-guide-test--node "literal"
+                                                    :title "Check [1]"))))))
+    (with-temp-buffer
+      (code-guide-mode)
+      (code-guide--load (code-guide-parse-string json))
+      (let* ((entries (funcall imenu-create-index-function))
+             (labels (mapcar #'car entries))
+             (expected '("flat" "parent" "child"
+                         "duplicates" "one" "two" "literal")))
+        (should (= (length labels)
+                   (length (delete-dups (copy-sequence labels)))))
+        (cl-mapc
+         (lambda (entry id)
+           (code-guide-test--select-imenu-entry entry)
+           (should (equal (code-guide-test--current-id) id)))
+         entries expected)))))
+
 (ert-deftest code-guide-visit/goes-to-line-and-keeps-focus-on-preview ()
   (code-guide-test--with-repo `(("f.c" . ,code-guide-test--source))
     (with-temp-file guide (insert (code-guide-test--tree-guide)))
@@ -941,6 +1027,37 @@ every heading carries its node.  Titles are random strings."
       (with-temp-file guide (insert (code-guide-test--json (code-guide-test--node "only"))))
       (code-guide-reload)
       (should (equal (code-guide-test--current-id) "only")))))
+
+(defun code-guide-test--imenu-labels (&optional refresh)
+  "Return reader entries from the Imenu index, optionally forcing REFRESH."
+  (mapcar #'car
+          (cl-remove-if
+           (lambda (entry)
+             (and (numberp (cdr entry)) (< (cdr entry) 0)))
+           (imenu--make-index-alist refresh))))
+
+(ert-deftest code-guide-imenu/reload-freshness ()
+  "Imenu reflects successful reloads and keeps the last valid guide."
+  (code-guide-test--with-repo nil
+    (with-temp-file guide
+      (insert (code-guide-test--json
+               (code-guide-test--node "old" :title "Old"))))
+    (with-current-buffer (code-guide-open-file guide)
+      (should (equal (code-guide-test--imenu-labels t) '("Old")))
+      (with-temp-file guide
+        (insert (code-guide-test--json
+                 (code-guide-test--node "new" :title "New"))))
+      (code-guide-reload)
+      (should (equal (code-guide-test--imenu-labels) '("New")))
+      (should (equal (code-guide-document-source-file code-guide--document)
+                     guide))
+      (with-temp-file guide (insert "not json"))
+      (should-error (code-guide-reload) :type 'user-error)
+      (should (equal (code-guide-test--imenu-labels) '("New")))))
+  (with-temp-buffer
+    (code-guide-mode)
+    (code-guide--load (code-guide-parse-string (code-guide-test--json)))
+    (should-not (funcall imenu-create-index-function))))
 
 (provide 'code-guide-test)
 ;;; code-guide-test.el ends here

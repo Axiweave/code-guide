@@ -87,6 +87,11 @@ TRAMP versions, =msgpack= package, remote host, and deployed server. A missing
 RPC prerequisite or connection error is reported as-is; code-guide never
 switches the path to standard TRAMP or a local file.
 
+Run =M-x imenu= in a guide buffer to search every node by its hierarchy
+path. Folded and narrative nodes remain selectable. Duplicate sibling titles
+include one-based occurrence numbers. If Consult is already installed,
+=M-x consult-imenu= uses the same entries without Code Guide configuration.
+
 Keys in the guide buffer:
 
 | Key       | Command                          |

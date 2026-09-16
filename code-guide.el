@@ -43,6 +43,7 @@
 (require 'pulse)
 (require 'project)
 (require 'compile)
+(require 'imenu)
 
 (declare-function evil-define-key "evil-core"
                   (state keymap key def &rest bindings))
@@ -572,6 +573,46 @@ Each diagnostic is (SEVERITY FILE LINE MESSAGE) where SEVERITY is
     (code-guide--render)
     (when node (code-guide--goto-node node))))
 
+;;;; Outline navigation
+
+(defun code-guide--imenu-goto (_name node &rest _)
+  "Select NODE from an Imenu special item."
+  (code-guide--goto-node node))
+
+(defun code-guide--imenu-create-index ()
+  "Return a flat Imenu index for the current guide."
+  (let ((counts (make-hash-table :test #'equal))
+        (seen (make-hash-table :test #'equal))
+        (labels (make-hash-table :test #'eq))
+        (used (make-hash-table :test #'equal)))
+    (dolist (node code-guide--nodes)
+      (let ((key (cons (and (code-guide-node-parent node)
+                            (code-guide-node-id (code-guide-node-parent node)))
+                       (code-guide-node-title node))))
+        (puthash key (1+ (gethash key counts 0)) counts)))
+    (mapcar
+     (lambda (node)
+       (let* ((parent (code-guide-node-parent node))
+              (title (code-guide-node-title node))
+              (key (cons (and parent (code-guide-node-id parent)) title))
+              (occurrence (1+ (gethash key seen 0)))
+              (segment (if (> (gethash key counts) 1)
+                           (format "%s [%d]" title occurrence)
+                         title))
+              (label (if parent
+                         (concat (gethash parent labels) " / " segment)
+                       segment))
+              (unique label)
+              (suffix 2))
+         (while (gethash unique used)
+           (setq unique (format "%s [%d]" label suffix)
+                 suffix (1+ suffix)))
+         (puthash key occurrence seen)
+         (puthash node unique labels)
+         (puthash unique t used)
+         (list unique node #'code-guide--imenu-goto)))
+     code-guide--nodes)))
+
 ;;;; Visiting
 
 (defun code-guide--protected-buffer-p (buffer)
@@ -720,7 +761,9 @@ Return the window showing the source."
 (define-derived-mode code-guide-mode special-mode "Code-Guide"
   "Major mode for reading a code guide."
   (setq-local truncate-lines nil
-              word-wrap t)
+              word-wrap t
+              imenu-create-index-function #'code-guide--imenu-create-index
+              imenu-auto-rescan t)
   (hl-line-mode 1))
 
 (with-eval-after-load 'evil
