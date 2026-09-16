@@ -1,1 +1,6 @@
 *.elc
+.DS_Store
+*.tmp
+*.swp
+.vscode/
+.idea/
