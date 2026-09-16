@@ -30,6 +30,19 @@ Requires Emacs 29.1 or later. No other dependencies.
    =M-x code-guide-open-project-guide= to find one under =.code-guides/=,
    =.codeguide.json=, or =docs/code-guides/=.
 
+Guide placement uses =code-guide-guide-display-buffer-action=. It accepts a
+complete =display-buffer= action and defaults to =nil=, which preserves the
+standard =pop-to-buffer= behavior. For example, show guides at the bottom:
+
+#+begin_src elisp
+(setq code-guide-guide-display-buffer-action
+      '((display-buffer-at-bottom)
+        (window-height . 0.25)))
+#+end_src
+
+This setting does not change =code-guide-display-buffer-action=, which controls
+source visits and previews.
+
 Remote guides use the same commands and keys. Select a standard TRAMP guide
 directly:
 

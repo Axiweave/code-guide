@@ -120,6 +120,42 @@ SPEC is an alist of (RELATIVE-PATH . CONTENT); the guide is written to
        (should (string-match-p (regexp-quote missing)
                                (error-message-string err)))))))
 
+(ert-deftest code-guide-open/displays-guide-at-bottom ()
+  "A bottom display action shows and selects the guide below other windows."
+  (code-guide-test--with-repo nil
+    (with-temp-file guide (insert (code-guide-test--json)))
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((code-guide-guide-display-buffer-action
+             '((display-buffer-at-bottom)
+               (window-height . 0.25)
+               (window-parameters . ((code-guide-test-bottom . t))))))
+        (code-guide-open guide)
+        (should-not (one-window-p))
+        (should (eq (current-buffer) (window-buffer (selected-window))))
+        (should (window-at-side-p (selected-window) 'bottom))
+        (should (window-parameter (selected-window)
+                                  'code-guide-test-bottom))))))
+
+(ert-deftest code-guide-open/default-and-runtime-action-reuse-buffer ()
+  "Nil follows default display rules; later actions reuse the guide buffer."
+  (code-guide-test--with-repo nil
+    (with-temp-file guide (insert (code-guide-test--json)))
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((code-guide-guide-display-buffer-action nil)
+            first)
+        (let ((display-buffer-alist '((".*" display-buffer-same-window))))
+          (setq first (code-guide-open guide))
+          (should (one-window-p)))
+        (setq code-guide-guide-display-buffer-action
+              '((display-buffer-at-bottom)
+                (window-parameters . ((code-guide-test-runtime . t)))))
+        (let ((second (code-guide-open guide)))
+          (should (eq first second))
+          (should (window-parameter (selected-window)
+                                    'code-guide-test-runtime)))))))
+
 (ert-deftest code-guide-open/preserves-remote-source ()
   "Opening through a file-name handler keeps the complete remote source."
   (let* ((remote "/code-guide-test:reader@example.test:/repo/guide.codeguide.json")
@@ -351,6 +387,31 @@ SPEC is an alist of (RELATIVE-PATH . CONTENT); the guide is written to
             (should (= (line-number-at-pos (window-point window)) 2))))
         (should (gethash "b" code-guide--visited))
         (should (eq (get-text-property (+ (point) 2) 'face) 'code-guide-visited-face))))))
+
+(ert-deftest code-guide-visit/guide-and-source-actions-are-independent ()
+  "Guide and source buffers honor separate display actions."
+  (code-guide-test--with-repo `(("f.c" . ,code-guide-test--source))
+    (with-temp-file guide (insert (code-guide-test--tree-guide)))
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((code-guide-guide-display-buffer-action
+             '((display-buffer-at-bottom)
+               (window-parameters . ((code-guide-test-guide . t)))))
+            (code-guide-display-buffer-action
+             '((display-buffer-pop-up-window)
+               (inhibit-same-window . t)
+               (window-parameters . ((code-guide-test-source . t))))))
+        (code-guide-open guide)
+        (let ((guide-window (selected-window)))
+          (code-guide-next-node)
+          (let ((source-window (code-guide-preview)))
+            (should (eq (selected-window) guide-window))
+            (should (window-parameter guide-window 'code-guide-test-guide))
+            (should (window-parameter source-window 'code-guide-test-source))
+            (should-not (eq guide-window source-window))
+            (should (equal (file-name-nondirectory
+                            (buffer-file-name (window-buffer source-window)))
+                           "f.c"))))))))
 
 (ert-deftest code-guide-visit/preview-never-replaces-guide-in-one-window-frame ()
   "Invariant: after a preview the guide window still shows the guide.

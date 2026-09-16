@@ -65,6 +65,12 @@ reused, so a preview in a one-window frame splits instead of replacing
 the guide."
   :type 'sexp)
 
+(defcustom code-guide-guide-display-buffer-action nil
+  "Display action used to show a guide buffer.
+See `display-buffer' for the format.  Nil preserves the default
+`pop-to-buffer' behavior."
+  :type 'sexp)
+
 (defcustom code-guide-show-comments t
   "When non-nil, render each node's comment under its heading."
   :type 'boolean)
@@ -698,7 +704,8 @@ Return the window showing the source."
 (defun code-guide-open (file)
   "Open the guide in FILE and show it."
   (interactive "fGuide file: ")
-  (pop-to-buffer (code-guide-open-file file)))
+  (pop-to-buffer (code-guide-open-file file)
+                 code-guide-guide-display-buffer-action))
 
 (defun code-guide--project-guides ()
   "Return the guide files found in the current project."
