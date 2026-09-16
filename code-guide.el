@@ -44,6 +44,10 @@
 (require 'project)
 (require 'compile)
 
+(declare-function evil-define-key "evil-core"
+                  (state keymap key def &rest bindings))
+(declare-function evil-set-initial-state "evil-core" (mode state))
+
 ;;;; Customization
 
 (defgroup code-guide nil
@@ -578,6 +582,7 @@ Return the window showing the source."
         (set-window-buffer window buffer))
       (with-selected-window window
         (code-guide--goto-location location)
+        (recenter)
         (pulse-momentary-highlight-one-line (point)))
       (puthash (code-guide-node-id node) t code-guide--visited)
       (let ((inhibit-read-only t)
@@ -633,6 +638,25 @@ Return the window showing the source."
   (setq-local truncate-lines nil
               word-wrap t)
   (hl-line-mode 1))
+
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'code-guide-mode 'motion)
+  (evil-define-key '(normal motion) code-guide-mode-map
+    (kbd "RET") #'code-guide-visit
+    (kbd "SPC") #'code-guide-preview
+    "o" #'code-guide-visit-other-window
+    "n" #'code-guide-next-node
+    "p" #'code-guide-previous-node
+    "]" #'code-guide-next-sibling
+    "[" #'code-guide-previous-sibling
+    "u" #'code-guide-parent
+    "d" #'code-guide-first-child
+    (kbd "TAB") #'code-guide-toggle-subtree
+    (kbd "S-TAB") #'code-guide-fold-all
+    "U" #'code-guide-unfold-all
+    "g" #'code-guide-reload
+    "v" #'code-guide-validate
+    "q" #'quit-window))
 
 (defun code-guide--load (document)
   "Install DOCUMENT in the current guide buffer and render it."
