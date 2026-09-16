@@ -52,9 +52,13 @@
   :prefix "code-guide-")
 
 (defcustom code-guide-display-buffer-action
-  '((display-buffer-reuse-window display-buffer-use-some-window))
+  '((display-buffer-reuse-window display-buffer-use-some-window
+     display-buffer-pop-up-window)
+    (inhibit-same-window . t))
   "Display action used to show a node's source buffer.
-See `display-buffer' for the format."
+See `display-buffer' for the format.  The guide window itself is never
+reused, so a preview in a one-window frame splits instead of replacing
+the guide."
   :type 'sexp)
 
 (defcustom code-guide-show-comments t
@@ -144,15 +148,20 @@ See `display-buffer' for the format."
     (code-guide--fail "node %s: location must be an object" node-id))
   (let ((file (code-guide--get alist 'file #'stringp))
         (line (code-guide--get alist 'line #'integerp))
-        (column (code-guide--get alist 'column #'integerp)))
+        (column (code-guide--get alist 'column #'integerp))
+        (symbol (code-guide--get alist 'symbol #'stringp))
+        (anchor (code-guide--get alist 'anchor #'stringp)))
     (unless (and file (> (length file) 0))
       (code-guide--fail "node %s: location needs a file" node-id))
     (unless line
       (code-guide--fail "node %s: location needs a line" node-id))
+    ;; An empty anchor would match everywhere and never advance the search.
+    (when (equal anchor "")
+      (code-guide--fail "node %s: anchor must not be empty" node-id))
+    (when (equal symbol "")
+      (code-guide--fail "node %s: symbol must not be empty" node-id))
     (make-code-guide-location
-     :file file :line line :column column
-     :symbol (code-guide--get alist 'symbol #'stringp)
-     :anchor (code-guide--get alist 'anchor #'stringp))))
+     :file file :line line :column column :symbol symbol :anchor anchor)))
 
 (defun code-guide--parse-node (alist parent depth seen)
   "Build a `code-guide-node' from ALIST under PARENT at DEPTH.
@@ -556,7 +565,18 @@ Return the window showing the source."
     (let* ((file (code-guide-resolve-file document location))
            (buffer (or (and (file-readable-p file) (find-file-noselect file))
                        (user-error "File does not exist: %s" file)))
-           (window (display-buffer buffer code-guide-display-buffer-action)))
+           (guide-buffer (current-buffer))
+           (guide-window (get-buffer-window guide-buffer))
+           (window (or (display-buffer buffer code-guide-display-buffer-action)
+                       (selected-window))))
+      ;; A user display rule, or a frame too small for `pop-up-window',
+      ;; may still hand over the guide window.  Take it back and split.
+      (when (and guide-window (eq window guide-window))
+        (set-window-buffer guide-window guide-buffer)
+        (setq window (or (ignore-errors (split-window guide-window nil 'right))
+                         (ignore-errors (split-window guide-window nil 'below))
+                         (display-buffer buffer '((display-buffer-pop-up-frame)))))
+        (set-window-buffer window buffer))
       (with-selected-window window
         (code-guide--goto-location location)
         (pulse-momentary-highlight-one-line (point)))

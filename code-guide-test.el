@@ -101,7 +101,11 @@ SPEC is an alist of (RELATIVE-PATH . CONTENT); the guide is written to
                      (json-serialize '(:version 1 :nodes []))
                      (json-serialize '(:version 1 :title "T" :nodes [(:title "no id")]))
                      (json-serialize '(:version 1 :title "T"
-                                       :nodes [(:id "a" :title "a" :location (:file "f"))]))))
+                                       :nodes [(:id "a" :title "a" :location (:file "f"))]))
+                     ;; An empty anchor would loop forever in the search.
+                     (json-serialize '(:version 1 :title "T"
+                                       :nodes [(:id "a" :title "a"
+                                                :location (:file "f" :line 1 :anchor ""))]))))
     (should-error (code-guide-parse-string bad) :type 'code-guide-parse-error)))
 
 ;;;; Root resolution
@@ -140,6 +144,19 @@ SPEC is an alist of (RELATIVE-PATH . CONTENT); the guide is written to
       (should (cl-some (lambda (m) (string-match-p "missing: file does not exist" m)) messages))
       (should (cl-some (lambda (m) (string-match-p "far: line outside file" m)) messages))
       (should (cl-some (lambda (m) (string-match-p "out: file is outside" m)) messages)))))
+
+(ert-deftest code-guide-resolve/sibling-prefix-is-outside-root ()
+  "A directory whose name merely starts with the root name is outside it."
+  (code-guide-test--with-repo `(("sub/f.c" . ,code-guide-test--source)
+                                ("sub-evil/f.c" . ,code-guide-test--source))
+    (with-temp-file guide
+      (insert (json-serialize
+               `(:version 1 :title "T" :root "sub"
+                 :nodes [,(code-guide-test--node "in" :location '(:file "f.c" :line 1))
+                         ,(code-guide-test--node "out" :location '(:file "../sub-evil/f.c" :line 1))]))))
+    (let ((diags (code-guide-validate-document (code-guide-parse-file guide))))
+      (should (= (length diags) 1))
+      (should (string-match-p "out: file is outside" (nth 3 (car diags)))))))
 
 ;;;; Locations
 
@@ -263,6 +280,123 @@ SPEC is an alist of (RELATIVE-PATH . CONTENT); the guide is written to
             (should (= (line-number-at-pos (window-point window)) 2))))
         (should (gethash "b" code-guide--visited))
         (should (eq (get-text-property (+ (point) 2) 'face) 'code-guide-visited-face))))))
+
+(ert-deftest code-guide-visit/preview-never-replaces-guide-in-one-window-frame ()
+  "Invariant: after a preview the guide window still shows the guide.
+Holds for the default action, and when a user rule or a frame too small
+for `display-buffer-pop-up-window' forces the same window."
+  (code-guide-test--with-repo `(("f.c" . ,code-guide-test--source))
+    (with-temp-file guide (insert (code-guide-test--tree-guide)))
+    (let ((buffer (code-guide-open-file guide)))
+      (dolist (case (list (list nil nil)
+                          (list '((".*" display-buffer-same-window)) nil)
+                          (list nil 1000)))
+        (pcase-let ((`(,alist ,threshold) case))
+          (save-window-excursion
+            (delete-other-windows)
+            (set-window-buffer (selected-window) buffer)
+            (with-current-buffer buffer
+              (code-guide-next-node)
+              (let* ((display-buffer-alist alist)
+                     (split-height-threshold (or threshold split-height-threshold))
+                     (split-width-threshold (or threshold split-width-threshold))
+                     (guide-window (selected-window))
+                     (source-window (code-guide-preview)))
+                (should (eq (selected-window) guide-window))
+                (should (eq (window-buffer guide-window) buffer))
+                (should-not (eq source-window guide-window))
+                (should (equal (file-name-nondirectory
+                                (buffer-file-name (window-buffer source-window)))
+                               "f.c"))))))))))
+
+;;;; Properties over generated trees
+
+(defconst code-guide-test--seed 20260916
+  "Fixed seed for generated trees; printed on failure.")
+
+(defun code-guide-test--random-tree (depth counter)
+  "Return a random node vector at DEPTH.  COUNTER is a cons cell holding the next id."
+  (let ((count (if (> depth 2) 0 (random 4)))
+        nodes)
+    (dotimes (_ count)
+      (let ((id (format "n%d" (cl-incf (car counter)))))
+        (push (apply #'code-guide-test--node id
+                     :children (code-guide-test--random-tree (1+ depth) counter)
+                     (when (zerop (random 2))
+                       (list :location (list :file "f.c" :line (1+ (random 40))))))
+              nodes)))
+    (vconcat (nreverse nodes))))
+
+(defun code-guide-test--walk-forward ()
+  "Return ids visited by `n' from the first node until it errors."
+  (let (order)
+    (push (code-guide-test--current-id) order)
+    (while (ignore-errors (code-guide-next-node) t)
+      (push (code-guide-test--current-id) order))
+    (nreverse order)))
+
+(ert-deftest code-guide-property/navigation-round-trip ()
+  "Invariants on random trees: `n' visits every node once in depth-first order,
+`p' walks the same path in reverse, `u' undoes `d', and parent depth is
+child depth minus one.  Empty and single-node trees are included."
+  (random (number-to-string code-guide-test--seed))
+  (message "code-guide property seed: %d" code-guide-test--seed)
+  (code-guide-test--with-repo `(("f.c" . ,code-guide-test--source))
+    (dotimes (trial 25)
+      (let* ((tree (pcase trial
+                     (0 [])
+                     (1 (vector (code-guide-test--node "only")))
+                     (_ (code-guide-test--random-tree 0 (list 0)))))
+             (json (json-serialize `(:version 1 :title "T" :nodes ,tree))))
+        (with-temp-file guide (insert json))
+        (with-current-buffer (code-guide-open-file guide)
+          (let* ((expected (code-guide-test--ids code-guide--nodes))
+                 (context (format "seed=%d trial=%d json=%s"
+                                  code-guide-test--seed trial json)))
+            (if (null expected)
+                (progn
+                  (should (null (code-guide-current-node)))
+                  (should-error (code-guide-next-node) :type 'user-error))
+              (let ((forward (code-guide-test--walk-forward)))
+                (should (equal (cons context forward) (cons context expected)))
+                (should (= (length forward) (length (delete-dups (copy-sequence forward)))))
+                (let (backward)
+                  (push (code-guide-test--current-id) backward)
+                  (while (ignore-errors (code-guide-previous-node) t)
+                    (push (code-guide-test--current-id) backward))
+                  (should (equal (cons context backward) (cons context expected))))
+                (dolist (node code-guide--nodes)
+                  (when-let* ((parent (code-guide-node-parent node)))
+                    (should (= (code-guide-node-depth node)
+                               (1+ (code-guide-node-depth parent)))))
+                  (when (code-guide-node-children node)
+                    (code-guide--goto-node node)
+                    (code-guide-first-child)
+                    (code-guide-parent)
+                    (should (equal (cons context (code-guide-test--current-id))
+                                   (cons context (code-guide-node-id node))))))))))))))
+
+(ert-deftest code-guide-property/parse-render-round-trip ()
+  "Invariant: a parsed tree renders one heading per node, in order, and
+every heading carries its node.  Titles are random strings."
+  (random (number-to-string code-guide-test--seed))
+  (message "code-guide property seed: %d" code-guide-test--seed)
+  (dotimes (trial 25)
+    (let* ((counter (list 0))
+           (tree (code-guide-test--random-tree 0 counter))
+           (json (json-serialize `(:version 1 :title "T" :nodes ,tree)))
+           (context (format "seed=%d trial=%d" code-guide-test--seed trial)))
+      (with-temp-buffer
+        (code-guide-mode)
+        (code-guide--load (code-guide-parse-string json))
+        (let ((rendered nil) (pos (point-min)))
+          (while pos
+            (when-let* ((id (get-text-property pos 'code-guide-node-id)))
+              (unless (equal id (car rendered)) (push id rendered)))
+            (setq pos (next-single-property-change pos 'code-guide-node-id)))
+          (should (equal (cons context (nreverse rendered))
+                         (cons context (code-guide-test--ids code-guide--nodes))))
+          (should (= (length code-guide--nodes) (car counter))))))))
 
 ;;;; Reload
 
