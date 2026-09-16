@@ -65,6 +65,16 @@ reused, so a preview in a one-window frame splits instead of replacing
 the guide."
   :type 'sexp)
 
+(defcustom code-guide-protected-buffer-name-patterns nil
+  "Regexps matching buffer names that source display must not replace."
+  :type '(repeat regexp))
+
+(defcustom code-guide-protected-buffer-predicate nil
+  "Optional function called with a buffer.
+A non-nil result prevents source display from replacing that buffer's
+visible windows."
+  :type '(choice (const :tag "None" nil) function))
+
 (defcustom code-guide-guide-display-buffer-action nil
   "Display action used to show a guide buffer.
 See `display-buffer' for the format.  Nil preserves the default
@@ -564,6 +574,83 @@ Each diagnostic is (SEVERITY FILE LINE MESSAGE) where SEVERITY is
 
 ;;;; Visiting
 
+(defun code-guide--protected-buffer-p (buffer)
+  "Return non-nil when BUFFER is protected from source display."
+  (or (cl-some (lambda (regexp)
+                 (string-match-p regexp (buffer-name buffer)))
+               code-guide-protected-buffer-name-patterns)
+      (and code-guide-protected-buffer-predicate
+           (funcall code-guide-protected-buffer-predicate buffer))))
+
+(defun code-guide--excluded-window-snapshot (guide-window)
+  "Return state for visible protected windows and GUIDE-WINDOW."
+  (let (snapshot)
+    (dolist (frame (delete-dups (cons (selected-frame) (visible-frame-list))))
+      (dolist (window (window-list frame 'nomini))
+        (when (or (eq window guide-window)
+                  (code-guide--protected-buffer-p (window-buffer window)))
+          (push (list window
+                      (window-buffer window)
+                      (window-dedicated-p window))
+                snapshot))))
+    snapshot))
+
+(defun code-guide--validate-protection ()
+  "Validate protected-buffer configuration before display."
+  (dolist (regexp code-guide-protected-buffer-name-patterns)
+    (string-match-p regexp ""))
+  (when (and code-guide-protected-buffer-predicate
+             (not (functionp code-guide-protected-buffer-predicate)))
+    (signal 'wrong-type-argument
+            (list 'functionp code-guide-protected-buffer-predicate))))
+
+(defun code-guide--restore-excluded-windows (snapshot &optional final)
+  "Restore buffers in SNAPSHOT.
+When FINAL is nil, keep each live window temporarily dedicated."
+  (dolist (state snapshot)
+    (pcase-let ((`(,window ,buffer ,dedicated) state))
+      (when (window-live-p window)
+        (set-window-dedicated-p window nil)
+        (when (and (buffer-live-p buffer)
+                   (not (eq (window-buffer window) buffer)))
+          (set-window-buffer window buffer))
+        (set-window-dedicated-p window (if final dedicated t))))))
+
+(defun code-guide--safe-source-window-p (window snapshot)
+  "Return non-nil when WINDOW is live and absent from SNAPSHOT."
+  (and (window-live-p window)
+       (not (assq window snapshot))))
+
+(defun code-guide--display-source-buffer (buffer guide-window)
+  "Display BUFFER without replacing protected windows or GUIDE-WINDOW."
+  (code-guide--validate-protection)
+  (let ((snapshot (code-guide--excluded-window-snapshot guide-window))
+        window)
+    (unwind-protect
+        (progn
+          (dolist (state snapshot)
+            (set-window-dedicated-p (car state) t))
+          (setq window (display-buffer buffer code-guide-display-buffer-action))
+          (code-guide--restore-excluded-windows snapshot)
+          (unless (code-guide--safe-source-window-p window snapshot)
+            (setq window nil))
+          (unless window
+            (setq window
+                  (or (ignore-errors (split-window guide-window nil 'right))
+                      (ignore-errors (split-window guide-window nil 'below))))
+            (when window
+              (set-window-dedicated-p window nil)
+              (set-window-buffer window buffer)))
+          (unless window
+            (setq window
+                  (display-buffer buffer '((display-buffer-pop-up-frame))))
+            (code-guide--restore-excluded-windows snapshot)
+            (unless (code-guide--safe-source-window-p window snapshot)
+              (setq window nil)))
+          (or window
+              (user-error "No safe window is available for the source")))
+      (code-guide--restore-excluded-windows snapshot t))))
+
 (defun code-guide-visit-node (node &optional preview)
   "Show NODE's location.  With PREVIEW, keep the guide window selected.
 Return the window showing the source."
@@ -576,16 +663,7 @@ Return the window showing the source."
                        (user-error "File does not exist: %s" file)))
            (guide-buffer (current-buffer))
            (guide-window (get-buffer-window guide-buffer))
-           (window (or (display-buffer buffer code-guide-display-buffer-action)
-                       (selected-window))))
-      ;; A user display rule, or a frame too small for `pop-up-window',
-      ;; may still hand over the guide window.  Take it back and split.
-      (when (and guide-window (eq window guide-window))
-        (set-window-buffer guide-window guide-buffer)
-        (setq window (or (ignore-errors (split-window guide-window nil 'right))
-                         (ignore-errors (split-window guide-window nil 'below))
-                         (display-buffer buffer '((display-buffer-pop-up-frame)))))
-        (set-window-buffer window buffer))
+           (window (code-guide--display-source-buffer buffer guide-window)))
       (with-selected-window window
         (code-guide--goto-location location)
         (recenter)

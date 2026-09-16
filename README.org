@@ -43,6 +43,33 @@ standard =pop-to-buffer= behavior. For example, show guides at the bottom:
 This setting does not change =code-guide-display-buffer-action=, which controls
 source visits and previews.
 
+Protect visible assistant or conversation buffers from source previews and
+visits with Emacs regular expressions:
+
+#+begin_src elisp
+(setq code-guide-protected-buffer-name-patterns
+      '("\\`\\*claude-code" "\\`\\*ghostel"))
+#+end_src
+
+For rules that need buffer state, set =code-guide-protected-buffer-predicate=
+to a function of one buffer. A non-nil result protects it:
+
+#+begin_src elisp
+(setq code-guide-protected-buffer-predicate
+      (lambda (buffer)
+        (with-current-buffer buffer
+          (derived-mode-p 'comint-mode))))
+#+end_src
+
+The name patterns and predicate use OR semantics. Both settings default to
+=nil= and changes apply to the next visit. Invalid regular expressions and
+predicate errors are reported before display changes a window.
+
+Protected windows and the guide window are not source destinations. Code Guide
+tries the configured source action, a new split, and then a new frame. If no
+safe destination exists, it reports an error without replacing a protected
+buffer. A custom display rule that selects a protected window is rejected.
+
 Remote guides use the same commands and keys. Select a standard TRAMP guide
 directly:
 

@@ -46,6 +46,15 @@ SPEC is an alist of (RELATIVE-PATH . CONTENT); the guide is written to
 (defconst code-guide-test--source
   (string-join (cl-loop for i from 1 to 40 collect (format "line %d" i)) "\n"))
 
+(defmacro code-guide-test--with-buffer (name &rest body)
+  "Create buffer NAME, bind it to `protected-buffer', and run BODY."
+  (declare (indent 1))
+  `(let ((protected-buffer (get-buffer-create ,name)))
+     (unwind-protect
+         (progn ,@body)
+       (when (buffer-live-p protected-buffer)
+         (kill-buffer protected-buffer)))))
+
 ;;;; Parsing
 
 (ert-deftest code-guide-parse/basic ()
@@ -440,6 +449,338 @@ for `display-buffer-pop-up-window' forces the same window."
                 (should (equal (file-name-nondirectory
                                 (buffer-file-name (window-buffer source-window)))
                                "f.c"))))))))))
+
+(ert-deftest code-guide-visit/protected-buffer-survives-all-commands ()
+  "A protected window is invariant across every source command."
+  (code-guide-test--with-repo `(("f.c" . ,code-guide-test--source))
+    (with-temp-file guide (insert (code-guide-test--tree-guide)))
+    (code-guide-test--with-buffer "*claude-code[code-guide]*"
+      (save-window-excursion
+        (delete-other-windows)
+        (let* ((guide-buffer (code-guide-open-file guide))
+               (guide-window (selected-window))
+               (protected-window (split-window-right))
+               (code-guide-protected-buffer-name-patterns
+                '("\\`\\*claude-code\\[code-guide\\]\\*\\'")))
+          (set-window-buffer guide-window guide-buffer)
+          (set-window-buffer protected-window protected-buffer)
+          (with-current-buffer guide-buffer
+            (code-guide-next-node)
+            (dolist (command '(code-guide-preview
+                               code-guide-visit
+                               code-guide-visit-other-window))
+              (select-window guide-window)
+              (funcall command)
+              (should (eq (window-buffer protected-window)
+                          protected-buffer))
+              (should (eq (window-buffer guide-window) guide-buffer)))))))))
+
+(ert-deftest code-guide-property/protected-buffer-matching ()
+  "Name patterns and the predicate agree with their OR contract."
+  (random (number-to-string code-guide-test--seed))
+  (message "code-guide property seed: %d" code-guide-test--seed)
+  (dotimes (trial 25)
+    (let* ((suffix (format "%x" (random #xffff)))
+           (name (format "*assistant-%s*" suffix))
+           (family (format "\\`\\*assistant-%c" (aref suffix 0)))
+           (predicate-name (format "*predicate-%s*" suffix)))
+      (code-guide-test--with-buffer name
+        (let ((code-guide-protected-buffer-name-patterns (list family))
+              (code-guide-protected-buffer-predicate
+               (lambda (buffer)
+                 (string= (buffer-name buffer) predicate-name))))
+          (should (code-guide--protected-buffer-p protected-buffer))
+          (with-temp-buffer
+            (rename-buffer predicate-name t)
+            (should (code-guide--protected-buffer-p (current-buffer))))
+          (with-temp-buffer
+            (rename-buffer (format "*other-%d*" trial) t)
+            (should-not (code-guide--protected-buffer-p (current-buffer)))))))))
+
+(ert-deftest code-guide-visit/protection-errors-before-display ()
+  "Bad protection configuration leaves visible buffers unchanged."
+  (code-guide-test--with-repo `(("f.c" . ,code-guide-test--source))
+    (with-temp-file guide (insert (code-guide-test--tree-guide)))
+    (let ((guide-buffer (code-guide-open-file guide)))
+      (save-window-excursion
+        (set-window-buffer (selected-window) guide-buffer)
+        (with-current-buffer guide-buffer
+          (code-guide-next-node)
+          (let ((code-guide-protected-buffer-name-patterns '("\\(")))
+            (should-error (code-guide-preview) :type 'invalid-regexp)
+            (should (eq (window-buffer (selected-window)) guide-buffer)))
+          (let ((candidate-window (split-window-right))
+                (candidate-buffer (get-buffer-create "*candidate*"))
+                (code-guide-protected-buffer-name-patterns nil)
+                (code-guide-protected-buffer-predicate
+                 (lambda (_) (error "predicate failed"))))
+            (unwind-protect
+                (progn
+                  (set-window-buffer candidate-window candidate-buffer)
+                  (should-error (code-guide-preview) :type 'error)
+                  (should (eq (window-buffer (selected-window)) guide-buffer)))
+              (kill-buffer candidate-buffer))))))))
+
+(ert-deftest code-guide-visit/rejects-custom-protected-destination ()
+  "A custom display rule cannot replace a protected buffer."
+  (code-guide-test--with-repo `(("f.c" . ,code-guide-test--source))
+    (with-temp-file guide (insert (code-guide-test--tree-guide)))
+    (code-guide-test--with-buffer "*protected*"
+      (save-window-excursion
+        (delete-other-windows)
+        (let* ((guide-buffer (code-guide-open-file guide))
+               (guide-window (selected-window))
+               (protected-window (split-window-right))
+               (code-guide-protected-buffer-name-patterns
+                '("\\`\\*protected\\*\\'"))
+               (code-guide-display-buffer-action
+                `((,(lambda (buffer _)
+                       (set-window-dedicated-p protected-window nil)
+                       (set-window-buffer protected-window buffer)
+                       protected-window)))))
+          (set-window-buffer guide-window guide-buffer)
+          (set-window-buffer protected-window protected-buffer)
+          (with-current-buffer guide-buffer
+            (code-guide-next-node)
+            (let ((source-window (code-guide-preview)))
+              (should (eq (window-buffer protected-window)
+                          protected-buffer))
+              (should-not (eq source-window protected-window))
+              (should-not (eq source-window guide-window)))))))))
+
+(ert-deftest code-guide-visit/restores-dedication-after-display-error ()
+  "A display error restores protected window state."
+  (code-guide-test--with-buffer "*protected*"
+    (save-window-excursion
+      (delete-other-windows)
+      (let* ((protected-window (selected-window))
+             (code-guide-protected-buffer-name-patterns
+              '("\\`\\*protected\\*\\'")))
+        (set-window-buffer protected-window protected-buffer)
+        (cl-letf (((symbol-function 'display-buffer)
+                   (lambda (&rest _) (error "display failed"))))
+          (should-error
+           (code-guide--display-source-buffer
+            (get-buffer-create "*source*") nil)
+           :type 'error))
+        (should-not (window-dedicated-p protected-window))
+        (should (eq (window-buffer protected-window) protected-buffer))
+        (kill-buffer "*source*")))))
+
+(ert-deftest code-guide-visit/runtime-protection-change-takes-effect ()
+  "The next source action observes changed protection settings."
+  (code-guide-test--with-repo `(("f.c" . ,code-guide-test--source))
+    (with-temp-file guide (insert (code-guide-test--tree-guide)))
+    (code-guide-test--with-buffer "*runtime-protected*"
+      (save-window-excursion
+        (delete-other-windows)
+        (let* ((guide-buffer (code-guide-open-file guide))
+               (guide-window (selected-window))
+               (target-window (split-window-right))
+               (code-guide-protected-buffer-name-patterns
+                '("\\`\\*runtime-protected\\*\\'"))
+               (code-guide-display-buffer-action
+                `((,(lambda (buffer _)
+                       (set-window-dedicated-p target-window nil)
+                       (set-window-buffer target-window buffer)
+                       target-window)))))
+          (set-window-buffer guide-window guide-buffer)
+          (set-window-buffer target-window protected-buffer)
+          (with-current-buffer guide-buffer
+            (code-guide-next-node)
+            (code-guide-preview)
+            (should (eq (window-buffer target-window) protected-buffer))
+            (setq code-guide-protected-buffer-name-patterns nil)
+            (code-guide-preview)
+            (should (equal (file-name-nondirectory
+                            (buffer-file-name (window-buffer target-window)))
+                           "f.c"))))))))
+
+(ert-deftest code-guide-visit/protects-buffer-on-remote-source-path ()
+  "Remote source resolution uses the same protected-window display path."
+  (let* ((remote "/code-guide-test:reader@example.test:/repo/guide.codeguide.json")
+         (source "/code-guide-test:reader@example.test:/repo/f.c")
+         (content (code-guide-test--json
+                   (code-guide-test--node
+                    "remote" :location '(:file "f.c" :line 1))))
+         (handler (lambda (operation &rest args)
+                    (if (eq operation 'insert-file-contents)
+                        (progn
+                          (insert content)
+                          (list (car args) (length content)))
+                      (let ((inhibit-file-name-handlers
+                             (cons (cdr (assoc "\\`/code-guide-test:"
+                                               file-name-handler-alist))
+                                   inhibit-file-name-handlers))
+                            (inhibit-file-name-operation operation))
+                        (apply operation args)))))
+         (file-name-handler-alist
+          (cons (cons "\\`/code-guide-test:" handler)
+                file-name-handler-alist))
+         (guide-buffer (code-guide-open-file remote))
+         requested
+         source-buffer)
+    (unwind-protect
+        (code-guide-test--with-buffer "*remote-protected*"
+          (save-window-excursion
+            (delete-other-windows)
+            (let ((guide-window (selected-window))
+                  (protected-window (split-window-right))
+                  (code-guide-protected-buffer-name-patterns
+                   '("\\`\\*remote-protected\\*\\'")))
+              (set-window-buffer guide-window guide-buffer)
+              (set-window-buffer protected-window protected-buffer)
+              (cl-letf (((symbol-function 'file-readable-p) (lambda (_) t))
+                        ((symbol-function 'find-file-noselect)
+                         (lambda (file &rest _)
+                           (setq requested file
+                                 source-buffer
+                                 (get-buffer-create "*remote-source*"))
+                           (with-current-buffer source-buffer
+                             (setq buffer-file-name file)
+                             (erase-buffer)
+                             (insert code-guide-test--source))
+                           source-buffer)))
+                (with-current-buffer guide-buffer
+                  (code-guide-preview)
+                  (should (equal requested source))
+                  (should (eq (window-buffer protected-window)
+                              protected-buffer)))))))
+      (when (buffer-live-p source-buffer) (kill-buffer source-buffer))
+      (when (buffer-live-p guide-buffer) (kill-buffer guide-buffer)))))
+
+(ert-deftest code-guide-visit/all-protected-uses-fresh-window ()
+  "A source already visible in a protected window gets a safe destination."
+  (code-guide-test--with-buffer "*protected-source*"
+    (let ((second-buffer (get-buffer-create "*protected-second*"))
+          (guide-buffer (get-buffer-create "*guide*")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (let* ((guide-window (selected-window))
+                   (source-window (split-window-right))
+                   (second-window (split-window-below))
+                   (code-guide-protected-buffer-name-patterns
+                    '("\\`\\*protected-.*\\*\\'")))
+              (set-window-buffer guide-window guide-buffer)
+              (set-window-buffer source-window protected-buffer)
+              (set-window-buffer second-window second-buffer)
+              (let ((destination
+                     (code-guide--display-source-buffer
+                      protected-buffer guide-window)))
+                (should-not (memq destination
+                                  (list guide-window
+                                        source-window
+                                        second-window)))
+                (should (eq (window-buffer source-window)
+                            protected-buffer))
+                (should-not (window-dedicated-p source-window))
+                (should (eq (window-buffer second-window)
+                            second-buffer))
+                (should-not (window-dedicated-p second-window))
+                (should (eq (window-buffer destination)
+                            protected-buffer)))))
+        (kill-buffer second-buffer)
+        (kill-buffer guide-buffer)))))
+
+(ert-deftest code-guide-visit/no-safe-destination-preserves-protected-window ()
+  "Failure leaves protected windows unchanged and restores dedication."
+  (code-guide-test--with-buffer "*protected*"
+    (let ((guide-buffer (get-buffer-create "*guide*"))
+          (source-buffer (get-buffer-create "*source*")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (let* ((guide-window (selected-window))
+                   (protected-window (split-window-right))
+                   (code-guide-protected-buffer-name-patterns
+                    '("\\`\\*protected\\*\\'"))
+                   (display-calls 0))
+              (set-window-buffer guide-window guide-buffer)
+              (set-window-buffer protected-window protected-buffer)
+              (cl-letf (((symbol-function 'split-window)
+                         (lambda (&rest _) nil))
+                        ((symbol-function 'display-buffer)
+                         (lambda (&rest _)
+                           (and (= (cl-incf display-calls) 1)
+                                protected-window))))
+                (should-error
+                 (code-guide--display-source-buffer
+                  source-buffer guide-window)
+                 :type 'user-error))
+              (should (= display-calls 2))
+              (should (eq (window-buffer guide-window) guide-buffer))
+              (should (eq (window-buffer protected-window)
+                          protected-buffer))
+              (should-not (window-dedicated-p protected-window))))
+        (kill-buffer guide-buffer)
+        (kill-buffer source-buffer)))))
+
+(ert-deftest code-guide-visit/preserves-multiple-protected-windows ()
+  "Preview and visit preserve every simultaneously protected window."
+  (code-guide-test--with-repo `(("f.c" . ,code-guide-test--source))
+    (with-temp-file guide (insert (code-guide-test--tree-guide)))
+    (let ((first-buffer (get-buffer-create "*assistant-one*"))
+          (second-buffer (get-buffer-create "*assistant-two*")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (let* ((guide-buffer (code-guide-open-file guide))
+                   (guide-window (selected-window))
+                   (first-window (split-window-right))
+                   (second-window (split-window-below))
+                   (code-guide-protected-buffer-name-patterns
+                    '("\\`\\*assistant-")))
+              (set-window-buffer guide-window guide-buffer)
+              (set-window-buffer first-window first-buffer)
+              (set-window-buffer second-window second-buffer)
+              (with-current-buffer guide-buffer
+                (code-guide-next-node)
+                (dolist (command '(code-guide-preview code-guide-visit))
+                  (select-window guide-window)
+                  (let ((source-window (funcall command)))
+                    (should-not (memq source-window
+                                      (list guide-window
+                                            first-window
+                                            second-window)))
+                    (should (equal (file-name-nondirectory
+                                    (buffer-file-name
+                                     (window-buffer source-window)))
+                                   "f.c"))
+                    (should (eq (window-buffer first-window) first-buffer))
+                    (should (eq (window-buffer second-window)
+                                second-buffer)))))))
+        (kill-buffer first-buffer)
+        (kill-buffer second-buffer)))))
+
+(ert-deftest code-guide-visit/rejects-protected-display-buffer-alist-window ()
+  "A global same-window rule cannot reuse a protected selected window."
+  (code-guide-test--with-repo `(("f.c" . ,code-guide-test--source))
+    (with-temp-file guide (insert (code-guide-test--tree-guide)))
+    (code-guide-test--with-buffer "*protected-global-rule*"
+      (save-window-excursion
+        (delete-other-windows)
+        (let* ((guide-buffer (code-guide-open-file guide))
+               (guide-window (selected-window))
+               (protected-window (split-window-right))
+               (display-buffer-alist
+                '(("f\\.c\\'" display-buffer-same-window)))
+               (code-guide-protected-buffer-name-patterns
+                '("\\`\\*protected-global-rule\\*\\'")))
+          (set-window-buffer guide-window guide-buffer)
+          (set-window-buffer protected-window protected-buffer)
+          (select-window protected-window)
+          (with-current-buffer guide-buffer
+            (code-guide-next-node)
+            (let ((source-window (code-guide-preview)))
+              (should (eq (window-buffer protected-window)
+                          protected-buffer))
+              (should-not (eq source-window protected-window))
+              (should-not (eq source-window guide-window))
+              (should (equal (file-name-nondirectory
+                              (buffer-file-name
+                               (window-buffer source-window)))
+                             "f.c")))))))))
 
 ;;;; Properties over generated trees
 
