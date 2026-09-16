@@ -30,6 +30,23 @@ Requires Emacs 29.1 or later. No other dependencies.
    =M-x code-guide-open-project-guide= to find one under =.code-guides/=,
    =.codeguide.json=, or =docs/code-guides/=.
 
+Remote guides use the same commands and keys. Select a standard TRAMP guide
+directly:
+
+#+begin_example
+/ssh:user@host:/path/to/repo/.codeguide.json
+#+end_example
+
+To discover guides in a remote project, first visit any file in that project,
+then run =M-x code-guide-open-project-guide=. Relative guide roots and source
+paths stay on the selected remote connection.
+
+TRAMP ships with Emacs. TRAMP-RPC is optional and uses the same workflow with
+an =/rpc:user@host:/path= filename. It requires its own supported Emacs and
+TRAMP versions, =msgpack= package, remote host, and deployed server. A missing
+RPC prerequisite or connection error is reported as-is; code-guide never
+switches the path to standard TRAMP or a local file.
+
 Keys in the guide buffer:
 
 | Key       | Command                          |

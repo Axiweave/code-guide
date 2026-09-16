@@ -250,8 +250,7 @@ SEEN is a hash table used to reject duplicate ids."
 
 (defun code-guide--inside-root-p (document file)
   "Return non-nil when FILE lies under DOCUMENT's root."
-  (let ((root (code-guide-document-root-directory document)))
-    (string-prefix-p (file-truename root) (file-truename file))))
+  (file-in-directory-p file (code-guide-document-root-directory document)))
 
 (defun code-guide--find-anchor (anchor line)
   "Return the line nearest LINE where ANCHOR occurs in the current buffer.
@@ -648,15 +647,19 @@ Return the window showing the source."
 
 (defun code-guide--buffer-name (file)
   "Return the guide buffer name for FILE."
-  (format "*Code Guide: %s*" (file-name-nondirectory file)))
+  (format "*Code Guide: %s*" (abbreviate-file-name (expand-file-name file))))
+
+(defun code-guide--parse-file-for-command (file)
+  "Parse FILE and report its path in command errors."
+  (condition-case err
+      (code-guide-parse-file file)
+    ((code-guide-parse-error file-error)
+     (user-error "%s: %s" file (error-message-string err)))))
 
 ;;;###autoload
 (defun code-guide-open-file (file)
   "Open the guide in FILE and return its buffer."
-  (let* ((document (condition-case err
-                       (code-guide-parse-file file)
-                     (code-guide-parse-error
-                      (user-error "%s: %s" file (cadr err)))))
+  (let* ((document (code-guide--parse-file-for-command file))
          (buffer (get-buffer-create (code-guide--buffer-name file))))
     (with-current-buffer buffer
       (unless (derived-mode-p 'code-guide-mode)
@@ -700,10 +703,7 @@ Return the window showing the source."
                    (user-error "Guide has no source file")))
          (current (code-guide-current-node))
          (id (and current (code-guide-node-id current)))
-         (document (condition-case err
-                       (code-guide-parse-file file)
-                     (code-guide-parse-error
-                      (user-error "%s: %s" file (cadr err))))))
+         (document (code-guide--parse-file-for-command file)))
     (code-guide--load document)
     (goto-char (point-min))
     (if-let* ((node (and id (cl-find id code-guide--nodes

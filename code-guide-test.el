@@ -108,6 +108,43 @@ SPEC is an alist of (RELATIVE-PATH . CONTENT); the guide is written to
                                                 :location (:file "f" :line 1 :anchor ""))]))))
     (should-error (code-guide-parse-string bad) :type 'code-guide-parse-error)))
 
+(ert-deftest code-guide-open/reports-guide-path-on-read-failure ()
+  "A read failure names the selected guide and remains a user error."
+  (let ((missing (expand-file-name "missing.codeguide.json"
+                                   temporary-file-directory)))
+    (condition-case err
+        (progn
+          (code-guide-open-file missing)
+          (ert-fail "Expected the missing guide to fail"))
+      (user-error
+       (should (string-match-p (regexp-quote missing)
+                               (error-message-string err)))))))
+
+(ert-deftest code-guide-open/preserves-remote-source ()
+  "Opening through a file-name handler keeps the complete remote source."
+  (let* ((remote "/code-guide-test:reader@example.test:/repo/guide.codeguide.json")
+         (content (code-guide-test--json))
+         (handler (lambda (operation &rest args)
+                    (if (eq operation 'insert-file-contents)
+                        (progn
+                          (insert content)
+                          (list (car args) (length content)))
+                      (let ((inhibit-file-name-handlers
+                             (cons (cdr (assoc "\\`/code-guide-test:"
+                                               file-name-handler-alist))
+                                   inhibit-file-name-handlers))
+                            (inhibit-file-name-operation operation))
+                        (apply operation args)))))
+         (file-name-handler-alist
+          (cons (cons "\\`/code-guide-test:" handler)
+                file-name-handler-alist))
+         (buffer (code-guide-open-file remote)))
+    (unwind-protect
+        (should (equal (code-guide-document-source-file
+                        (buffer-local-value 'code-guide--document buffer))
+                       remote))
+      (kill-buffer buffer))))
+
 ;;;; Root resolution
 
 (ert-deftest code-guide-resolve/relative-root ()
@@ -127,6 +164,23 @@ SPEC is an alist of (RELATIVE-PATH . CONTENT); the guide is written to
                       doc (code-guide-node-location (car (code-guide-document-nodes doc))))
                      (expand-file-name "sub/src/f.c" root)))
       (should (null (code-guide-validate-document doc))))))
+
+(ert-deftest code-guide-resolve/preserves-remote-identity ()
+  "Relative guide paths retain their complete remote identity."
+  (let* ((source "/ssh:reader@example.test:/srv/repo/guides/guide.codeguide.json")
+         (doc (code-guide-parse-string
+               (json-serialize
+                `(:version 1 :title "T" :root "../source"
+                  :nodes [,(code-guide-test--node
+                            "a" :location '(:file "lib/f.el" :line 1))]))
+               source))
+         (location (code-guide-node-location
+                    (car (code-guide-document-nodes doc)))))
+    (should (equal (code-guide-document-source-file doc) source))
+    (should (equal (code-guide-document-root-directory doc)
+                   "/ssh:reader@example.test:/srv/repo/source/"))
+    (should (equal (code-guide-resolve-file doc location)
+                   "/ssh:reader@example.test:/srv/repo/source/lib/f.el"))))
 
 (ert-deftest code-guide-resolve/missing-file ()
   (code-guide-test--with-repo `(("src/f.c" . ,code-guide-test--source))
@@ -157,6 +211,23 @@ SPEC is an alist of (RELATIVE-PATH . CONTENT); the guide is written to
     (let ((diags (code-guide-validate-document (code-guide-parse-file guide))))
       (should (= (length diags) 1))
       (should (string-match-p "out: file is outside" (nth 3 (car diags)))))))
+
+(ert-deftest code-guide-property/root-containment ()
+  "Invariant: roots contain themselves and descendants, not siblings."
+  (code-guide-test--with-repo nil
+    (dotimes (index 25)
+      (let* ((name (format "root-%d" index))
+             (dir (expand-file-name name root))
+             (child (expand-file-name "nested/file.el" dir))
+             (sibling (expand-file-name (concat name "-sibling/file.el") root))
+             (doc (make-code-guide-document :root dir)))
+        (make-directory (file-name-directory child) t)
+        (make-directory (file-name-directory sibling) t)
+        (with-temp-file child)
+        (with-temp-file sibling)
+        (should (code-guide--inside-root-p doc dir))
+        (should (code-guide--inside-root-p doc child))
+        (should-not (code-guide--inside-root-p doc sibling))))))
 
 ;;;; Locations
 
@@ -411,6 +482,31 @@ every heading carries its node.  Titles are random strings."
                          (cons context (mapcar #'car (code-guide-test--reference-dfs tree)))))
           (should (= (length code-guide--nodes) (car counter))))))))
 
+
+(ert-deftest code-guide-property/open-distinguishes-same-basename-guides ()
+  "Different guide identities never share a buffer."
+  (code-guide-test--with-repo nil
+    (dotimes (trial 10)
+      (let* ((one (expand-file-name
+                   (format "one-%d/guide.codeguide.json" trial) root))
+             (two (expand-file-name
+                   (format "two-%d/guide.codeguide.json" trial) root))
+             (context (format "trial=%d" trial)))
+        (dolist (file (list one two))
+          (make-directory (file-name-directory file) t)
+          (with-temp-file file (insert (code-guide-test--json))))
+        (let ((one-buffer (code-guide-open-file one))
+              (two-buffer (code-guide-open-file two)))
+          (should-not (eq one-buffer two-buffer))
+          (should (eq one-buffer (code-guide-open-file one)))
+          (should (equal
+                   (cons context
+                         (mapcar (lambda (buffer)
+                                   (code-guide-document-source-file
+                                    (buffer-local-value
+                                     'code-guide--document buffer)))
+                                 (list one-buffer two-buffer)))
+                   (cons context (list one two)))))))))
 ;;;; Reload
 
 (ert-deftest code-guide-reload/preserve-node-id ()
@@ -432,6 +528,8 @@ every heading carries its node.  Titles are random strings."
       (should (equal (code-guide-test--current-id) "e"))
       (code-guide-previous-node)
       (code-guide-reload)
+      (should (equal (code-guide-document-source-file code-guide--document)
+                     guide))
       ;; Fold state for "b" survived the reload: "d" stays hidden.
       (should-error (code-guide-next-node) :type 'user-error)
       (code-guide-first-child)
