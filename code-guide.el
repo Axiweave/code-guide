@@ -703,7 +703,12 @@ Return the window showing the source."
 ;;;###autoload
 (defun code-guide-open (file)
   "Open the guide in FILE and show it."
-  (interactive "fGuide file: ")
+  (interactive
+   (list (read-file-name
+          "Guide file: " nil nil t nil
+          (lambda (candidate)
+            (or (file-directory-p candidate)
+                (string-suffix-p ".codeguide.json" candidate))))))
   (pop-to-buffer (code-guide-open-file file)
                  code-guide-guide-display-buffer-action))
 
