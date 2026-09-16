@@ -52,7 +52,7 @@
   :prefix "code-guide-")
 
 (defcustom code-guide-display-buffer-action
-  '(display-buffer-reuse-window display-buffer-use-some-window)
+  '((display-buffer-reuse-window display-buffer-use-some-window))
   "Display action used to show a node's source buffer.
 See `display-buffer' for the format."
   :type 'sexp)
@@ -585,7 +585,7 @@ Return the window showing the source."
 (defun code-guide-visit-other-window ()
   "Visit the node at point in another window."
   (interactive)
-  (let ((code-guide-display-buffer-action '(display-buffer-pop-up-window)))
+  (let ((code-guide-display-buffer-action '((display-buffer-pop-up-window))))
     (code-guide-visit)))
 
 ;;;; Buffer setup and reload
