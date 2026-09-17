@@ -17,8 +17,25 @@ Requires Emacs 29.1 or later. No other dependencies.
 #+begin_src elisp
 (use-package code-guide
   :load-path "path/to/code-guide"
-  :commands (code-guide-open code-guide-open-project-guide))
+  :commands (code-guide-open code-guide-open-project-guide
+             code-guide-install-skills))
 #+end_src
+
+Install the bundled agent skill as a symlink from Emacs:
+
+#+begin_example
+M-x code-guide-install-skills
+#+end_example
+
+Or install it from the shell:
+
+#+begin_src sh
+make install-skills
+#+end_src
+
+This links =skills/code-guide-author= to
+=~/.agents/skills/code-guide-author=. It refuses to replace a real file or
+directory. Set =AGENT_SKILLS_DIR= to use a different agent skills directory.
 
 * Use
 

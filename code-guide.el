@@ -56,6 +56,11 @@
   :group 'tools
   :prefix "code-guide-")
 
+(defcustom code-guide-agent-skills-directory
+  (expand-file-name "~/.agents/skills")
+  "Directory where `code-guide-install-skills' links bundled skills."
+  :type 'directory)
+
 (defcustom code-guide-display-buffer-action
   '((display-buffer-reuse-window display-buffer-use-some-window
      display-buffer-pop-up-window)
@@ -852,6 +857,30 @@ Return the window showing the source."
     (code-guide-open (if (cdr guides)
                          (completing-read "Guide: " guides nil t)
                        (car guides)))))
+
+;;;###autoload
+(defun code-guide-install-skills (&optional directory)
+  "Link bundled agent skills into DIRECTORY.
+DIRECTORY defaults to `code-guide-agent-skills-directory'.  Replace an
+existing symlink, but refuse to replace a real file or directory."
+  (interactive)
+  (let* ((directory (or directory code-guide-agent-skills-directory))
+         (library (or (locate-library "code-guide")
+                      (user-error "Cannot locate code-guide")))
+         (source (expand-file-name "skills/code-guide-author"
+                                   (file-name-directory library)))
+         (target (expand-file-name "code-guide-author" directory)))
+    (unless (file-directory-p source)
+      (user-error "Bundled skill not found: %s" source))
+    (make-directory directory t)
+    (cond
+     ((file-symlink-p target)
+      (delete-file target))
+     ((file-exists-p target)
+      (user-error "Refusing to replace non-symlink: %s" target)))
+    (make-symbolic-link source target)
+    (message "Linked %s to %s" target source)
+    target))
 
 (defun code-guide-reload ()
   "Reread the guide file, keep the node at point when its id survives."

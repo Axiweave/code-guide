@@ -1059,5 +1059,35 @@ every heading carries its node.  Titles are random strings."
     (code-guide--load (code-guide-parse-string (code-guide-test--json)))
     (should-not (funcall imenu-create-index-function))))
 
+(ert-deftest code-guide-install-skills/symlink-and-collision-policy ()
+  "Skill installation replaces links and preserves real files and directories."
+  (let* ((directory (make-temp-file "code-guide-skills-" t))
+         (source (expand-file-name "skills/code-guide-author"
+                                   (file-name-directory
+                                    (locate-library "code-guide"))))
+         (target (expand-file-name "code-guide-author" directory)))
+    (unwind-protect
+        (progn
+          (should (equal (code-guide-install-skills directory) target))
+          (should (file-symlink-p target))
+          (should (equal (file-truename target) (file-truename source)))
+          (should (equal (code-guide-install-skills directory) target))
+          (delete-file target)
+          (make-symbolic-link "/missing/code-guide-author" target)
+          (should (equal (code-guide-install-skills directory) target))
+          (should (equal (file-truename target) (file-truename source)))
+          (delete-file target)
+          (with-temp-file target (insert "keep"))
+          (should-error (code-guide-install-skills directory) :type 'user-error)
+          (should (equal (with-temp-buffer
+                           (insert-file-contents target)
+                           (buffer-string))
+                         "keep"))
+          (delete-file target)
+          (make-directory target)
+          (should-error (code-guide-install-skills directory) :type 'user-error)
+          (should (file-directory-p target)))
+      (delete-directory directory t))))
+
 (provide 'code-guide-test)
 ;;; code-guide-test.el ends here
